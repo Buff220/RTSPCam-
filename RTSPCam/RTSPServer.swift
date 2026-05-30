@@ -140,24 +140,31 @@ final class RTSPClient {
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nPublic: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY\r\n\r\n")
 
         case "DESCRIBE":
-            // If SPS/PPS aren't ready yet (camera just started), wait up to 2s for them.
-            // This avoids sending an SDP without sprop-parameter-sets which crashes ffmpeg.
+            // If SPS/PPS aren't ready yet, defer the response on a DIFFERENT queue
+            // to avoid deadlocking our own serial queue with a semaphore wait.
             if sps == nil {
-                let deadline = DispatchTime.now() + .milliseconds(2000)
-                let waitResult = DispatchSemaphore(value: 0)
-                // Poll every 50ms
-                let timer = DispatchSource.makeTimerSource(queue: queue)
-                timer.schedule(deadline: .now(), repeating: .milliseconds(50))
-                timer.setEventHandler { [weak self] in
-                    if self?.sps != nil { waitResult.signal(); timer.cancel() }
+                let savedCseq = cseq
+                DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                    guard let self else { return }
+                    // Spin-wait up to 3 seconds for SPS/PPS on the background thread
+                    let start = CACurrentMediaTime()
+                    while CACurrentMediaTime() - start < 3.0 {
+                        var hasSPS = false
+                        self.queue.sync { hasSPS = self.sps != nil }
+                        if hasSPS { break }
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                    self.queue.async {
+                        let sdp = self.buildSDP()
+                        let len = sdp.data(using: .utf8)!.count
+                        self.sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(savedCseq)\r\nContent-Type: application/sdp\r\nContent-Length: \(len)\r\n\r\n\(sdp)")
+                    }
                 }
-                timer.resume()
-                _ = waitResult.wait(timeout: deadline)
-                timer.cancel()
+            } else {
+                let sdp = buildSDP()
+                let len = sdp.data(using: .utf8)!.count
+                sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nContent-Type: application/sdp\r\nContent-Length: \(len)\r\n\r\n\(sdp)")
             }
-            let sdp = buildSDP()
-            let len = sdp.data(using: .utf8)!.count
-            sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nContent-Type: application/sdp\r\nContent-Length: \(len)\r\n\r\n\(sdp)")
 
         case "SETUP":
             for line in lines { if line.lowercased().hasPrefix("transport:") { parseTransport(line) } }
@@ -196,19 +203,19 @@ final class RTSPClient {
             fmtp = "a=fmtp:96 packetization-mode=1;profile-level-id=\(profileLevel)\r\n"
         }
 
-        return """
-        v=0\r
-        o=- 0 0 IN IP4 127.0.0.1\r
-        s=RTSPCam\r
-        c=IN IP4 0.0.0.0\r
-        t=0 0\r
-        m=video 0 RTP/AVP 96\r
-        a=rtpmap:96 H264/90000\r
-        \(fmtp)a=control:streamid=0\r
-        a=framerate:30\r
-        \r
-
-        """
+        // Build SDP manually — no multiline string to avoid indentation being embedded
+        var sdp = ""
+        sdp += "v=0\r\n"
+        sdp += "o=- 0 0 IN IP4 127.0.0.1\r\n"
+        sdp += "s=RTSPCam\r\n"
+        sdp += "c=IN IP4 0.0.0.0\r\n"
+        sdp += "t=0 0\r\n"
+        sdp += "m=video 0 RTP/AVP 96\r\n"
+        sdp += "a=rtpmap:96 H264/90000\r\n"
+        sdp += fmtp
+        sdp += "a=control:streamid=0\r\n"
+        sdp += "a=framerate:30\r\n"
+        return sdp
     }
 
     private func parseTransport(_ line: String) {
