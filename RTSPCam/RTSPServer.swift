@@ -147,8 +147,8 @@ final class RTSPClient {
                 DispatchQueue.global(qos: .userInteractive).async { [weak self] in
                     guard let self else { return }
                     // Spin-wait up to 3 seconds for SPS/PPS on the background thread
-                    let start = CACurrentMediaTime()
-                    while CACurrentMediaTime() - start < 3.0 {
+                    let start = Date()
+                    while Date().timeIntervalSince(start) < 3.0 {
                         var hasSPS = false
                         self.queue.sync { hasSPS = self.sps != nil }
                         if hasSPS { break }
