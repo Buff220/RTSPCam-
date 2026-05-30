@@ -46,7 +46,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func configureSession() {
         session.beginConfiguration()
-        session.sessionPreset = .hd1920x1080
+        session.sessionPreset = .hd1280x720  // 720p — more reliable on iPhone 11
 
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             logger.error("No camera found")
@@ -71,7 +71,6 @@ final class CameraManager: NSObject, ObservableObject {
         output.setSampleBufferDelegate(self, queue: sessionQueue)
         if session.canAddOutput(output) { session.addOutput(output) }
 
-        // Set orientation — videoRotationAngle requires iOS 17, use legacy on iOS 16
         if let conn = output.connection(with: .video) {
             if #available(iOS 17.0, *) {
                 conn.videoRotationAngle = 90
@@ -89,8 +88,8 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         session.commitConfiguration()
-        DispatchQueue.main.async { self.resolution = "1920×1080" }
-        setupEncoder(width: 1920, height: 1080)
+        DispatchQueue.main.async { self.resolution = "1280×720" }
+        setupEncoder(width: 1280, height: 720)
     }
 
     private func configureFrameRate(device: AVCaptureDevice, fps: Int32) {
@@ -119,13 +118,12 @@ final class CameraManager: NSObject, ObservableObject {
         }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFPS as CFNumber)
+        // Force a keyframe every 2 seconds so SPS/PPS refresh often
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int32(targetFPS * 2) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
-        // kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder is iOS 17.4+, skip it —
-        // VideoToolbox uses hardware by default on iPhone anyway.
         VTCompressionSessionPrepareToEncodeFrames(session)
         encoder = session
         logger.info("H264 encoder ready (\(width)x\(height) @ \(self.targetFPS)fps)")
@@ -144,8 +142,8 @@ final class CameraManager: NSObject, ObservableObject {
 
         let manager = Unmanaged<CameraManager>.fromOpaque(refcon).takeUnretainedValue()
 
-        // A frame is a keyframe when it is NOT frameDropped (notSync flag doesn't exist in current SDK)
-        let isKeyframe = !flags.contains(.frameDropped)
+        // FIX: correct keyframe check — notSync means it's NOT a keyframe
+        let isKeyframe = !flags.contains(.notSync)
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if isKeyframe, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
@@ -175,7 +173,7 @@ final class CameraManager: NSObject, ObservableObject {
         var spsLen = 0
         var ppsOut: UnsafePointer<UInt8>?
         var ppsLen = 0
-        var nalSize: Int32 = 0   // must be Int32
+        var nalSize: Int32 = 0
 
         CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
             format, parameterSetIndex: 0,
@@ -189,6 +187,7 @@ final class CameraManager: NSObject, ObservableObject {
         if let s = spsOut, let p = ppsOut {
             let sps = Data(bytes: s, count: spsLen)
             let pps = Data(bytes: p, count: ppsLen)
+            // Fire on main thread for observers, and also notify server directly
             DispatchQueue.main.async { [weak self] in self?.onSPSPPS?(sps, pps) }
         }
     }
