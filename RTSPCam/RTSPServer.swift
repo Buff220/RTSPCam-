@@ -11,6 +11,10 @@ final class RTSPServer {
     private let queue = DispatchQueue(label: "rtsp.server", qos: .userInteractive)
     private let logger = Logger(subsystem: "RTSPCam", category: "RTSPServer")
 
+    // Stored at server level so new clients immediately get the latest params
+    private var latestSPS: Data?
+    private var latestPPS: Data?
+
     func start() throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
@@ -28,6 +32,21 @@ final class RTSPServer {
         clients.removeAll()
     }
 
+    /// Called by CameraManager when a new keyframe SPS/PPS pair is extracted
+    func updateSPSPPS(sps: Data, pps: Data) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.latestSPS = sps
+            self.latestPPS = pps
+            // Push updated params to all connected clients
+            self.clients.forEach {
+                $0.sps = sps
+                $0.pps = pps
+            }
+            self.logger.info("SPS/PPS updated (\(sps.count) / \(pps.count) bytes)")
+        }
+    }
+
     func sendNAL(_ data: Data, pts: CMTime, isKeyframe: Bool) {
         queue.async { [weak self] in
             self?.clients.forEach { $0.sendNAL(data, pts: pts, isKeyframe: isKeyframe) }
@@ -36,6 +55,9 @@ final class RTSPServer {
 
     private func handleNewConnection(_ conn: NWConnection) {
         let client = RTSPClient(connection: conn, serverPort: Self.port)
+        // Pass any already-known SPS/PPS so DESCRIBE works immediately
+        client.sps = latestSPS
+        client.pps = latestPPS
         client.onClose = { [weak self] in
             self?.queue.async {
                 self?.clients.removeAll { $0 === client }
@@ -63,6 +85,7 @@ final class RTSPClient {
     private var playing = false
     private var receivedBuffer = Data()
     private var cseq = 0
+
     var sps: Data?
     var pps: Data?
     var onClose: (() -> Void)?
@@ -115,40 +138,65 @@ final class RTSPClient {
         switch method {
         case "OPTIONS":
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nPublic: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY\r\n\r\n")
+
         case "DESCRIBE":
+            // FIX: always include sprop-parameter-sets if we have SPS/PPS.
+            // If not yet available, send a minimal SDP that at least won't crash ffmpeg —
+            // ffmpeg will re-read parameters from the bitstream once frames arrive.
             let sdp = buildSDP()
             let len = sdp.data(using: .utf8)!.count
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nContent-Type: application/sdp\r\nContent-Length: \(len)\r\n\r\n\(sdp)")
+
         case "SETUP":
             for line in lines { if line.lowercased().hasPrefix("transport:") { parseTransport(line) } }
             serverRTPPort = UInt16.random(in: 5000..<6000) * 2
             openRTPSocket()
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nTransport: RTP/AVP;unicast;client_port=\(clientRTPPort)-\(clientRTPPort+1);server_port=\(serverRTPPort)-\(serverRTPPort+1)\r\nSession: 1\r\n\r\n")
+
         case "PLAY":
             playing = true
-            sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nSession: 1\r\n\r\n")
+            sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nSession: 1\r\nRTP-Info: url=rtsp://\(clientHost)/live/streamid=0;seq=\(rtpSeq);rtptime=0\r\n\r\n")
+
         case "TEARDOWN":
             playing = false
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\n\r\n")
             close(); onClose?()
+
         default:
             sendResponse("RTSP/1.0 405 Method Not Allowed\r\nCSeq: \(cseq)\r\n\r\n")
         }
     }
 
     private func buildSDP() -> String {
-        var profileLevel = "42e01e"
-        var spsBase64 = ""
-        var ppsBase64 = ""
+        // Default Baseline profile-level-id for iPhone 11 H264
+        var profileLevel = "42e01f"  // Baseline 3.1 — widely compatible
+        var fmtp: String
+
         if let spsData = sps, let ppsData = pps, spsData.count > 3 {
+            // We have real SPS/PPS — embed them so receivers get parameters immediately
             profileLevel = String(format: "%02x%02x%02x", spsData[1], spsData[2], spsData[3])
-            spsBase64 = spsData.base64EncodedString()
-            ppsBase64 = ppsData.base64EncodedString()
+            let spsBase64 = spsData.base64EncodedString()
+            let ppsBase64 = ppsData.base64EncodedString()
+            fmtp = "a=fmtp:96 packetization-mode=1;profile-level-id=\(profileLevel);sprop-parameter-sets=\(spsBase64),\(ppsBase64)\r\n"
+        } else {
+            // No SPS/PPS yet — include profile-level-id so ffmpeg at least knows the codec.
+            // sprop-parameter-sets will come in-band with the first keyframe.
+            fmtp = "a=fmtp:96 packetization-mode=1;profile-level-id=\(profileLevel)\r\n"
         }
-        let fmtp = spsBase64.isEmpty
-            ? "a=fmtp:96 packetization-mode=1\r\n"
-            : "a=fmtp:96 packetization-mode=1;profile-level-id=\(profileLevel);sprop-parameter-sets=\(spsBase64),\(ppsBase64)\r\n"
-        return "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=RTSPCam\r\nt=0 0\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n\(fmtp)a=control:streamid=0\r\n"
+
+        return """
+        v=0\r
+        o=- 0 0 IN IP4 127.0.0.1\r
+        s=RTSPCam\r
+        c=IN IP4 0.0.0.0\r
+        t=0 0\r
+        m=video 0 RTP/AVP 96\r
+        a=rtpmap:96 H264/90000\r
+        \(fmtp)a=control:streamid=0\r
+        a=framerate:30\r
+        \r
+
+        """
     }
 
     private func parseTransport(_ line: String) {
@@ -170,15 +218,32 @@ final class RTSPClient {
 
     func sendNAL(_ nalData: Data, pts: CMTime, isKeyframe: Bool) {
         guard playing, rtpSocket != -1, clientRTPPort > 0 else { return }
+
+        // FIX: prepend SPS+PPS NALs before every keyframe so the receiver can always re-sync
+        if isKeyframe, let spsData = sps, let ppsData = pps {
+            let startCode = Data([0x00, 0x00, 0x00, 0x01])
+            var spsNAL = startCode; spsNAL.append(spsData)
+            var ppsNAL = startCode; ppsNAL.append(ppsData)
+            let ts = UInt32(CMTimeGetSeconds(pts) * 90000)
+            sendRawNAL(spsNAL, timestamp: ts, marker: false)
+            sendRawNAL(ppsNAL, timestamp: ts, marker: false)
+        }
+
         let timestamp = UInt32(CMTimeGetSeconds(pts) * 90000)
+        sendRawNAL(nalData, timestamp: timestamp, marker: true)
+    }
+
+    private func sendRawNAL(_ nalData: Data, timestamp: UInt32, marker: Bool) {
         var nal = nalData
         if nal.prefix(4) == Data([0,0,0,1]) { nal = nal.dropFirst(4) }
         else if nal.prefix(3) == Data([0,0,1]) { nal = nal.dropFirst(3) }
+
         let maxPayload = 1400
         if nal.count <= maxPayload {
-            sendRTPPacket(payload: nal, timestamp: timestamp, marker: true)
+            sendRTPPacket(payload: nal, timestamp: timestamp, marker: marker)
         } else {
-            let fuIndicator = (nal[0] & 0xe0) | 28
+            // FU-A fragmentation
+            let fuIndicator: UInt8 = (nal[0] & 0xe0) | 28
             let nalHeader = nal[0]
             var offset = 1
             let totalBytes = nal.count - 1
@@ -191,7 +256,7 @@ final class RTSPClient {
                 if isLast  { fuHeader |= 0x40 }
                 var payload = Data([fuIndicator, fuHeader])
                 payload.append(nal[offset..<(offset + chunkSize)])
-                sendRTPPacket(payload: payload, timestamp: timestamp, marker: isLast)
+                sendRTPPacket(payload: payload, timestamp: timestamp, marker: isLast && marker)
                 offset += chunkSize
             }
         }
