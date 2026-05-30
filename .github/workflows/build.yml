@@ -38,14 +38,17 @@ jobs:
             CONFIGURATION_BUILD_DIR=$PWD/build/Release-iphoneos \
             clean build
 
-      # 5. Package into .ipa
-      # AltStore re-signs it anyway, so we just zip the .app
+# 5. Package into .ipa
       - name: Package IPA
         run: |
+          cd build/Release-iphoneos
           mkdir -p Payload
-          cp -r build/Release-iphoneos/RTSPCam.app Payload/RTSPCam.app
-          zip -r RTSPCam.ipa Payload
+          cp -r RTSPCam.app Payload/RTSPCam.app
+          zip -r ../../RTSPCam.ipa Payload
+          cd ../..
           echo "IPA size: $(du -sh RTSPCam.ipa | cut -f1)"
+          echo "IPA contents:"
+          unzip -l RTSPCam.ipa | head -20
 
       # 6. Upload IPA as a downloadable artifact
       - name: Upload IPA artifact
