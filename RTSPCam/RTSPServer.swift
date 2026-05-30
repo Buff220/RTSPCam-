@@ -140,9 +140,21 @@ final class RTSPClient {
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nPublic: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY\r\n\r\n")
 
         case "DESCRIBE":
-            // FIX: always include sprop-parameter-sets if we have SPS/PPS.
-            // If not yet available, send a minimal SDP that at least won't crash ffmpeg —
-            // ffmpeg will re-read parameters from the bitstream once frames arrive.
+            // If SPS/PPS aren't ready yet (camera just started), wait up to 2s for them.
+            // This avoids sending an SDP without sprop-parameter-sets which crashes ffmpeg.
+            if sps == nil {
+                let deadline = DispatchTime.now() + .milliseconds(2000)
+                let waitResult = DispatchSemaphore(value: 0)
+                // Poll every 50ms
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                timer.schedule(deadline: .now(), repeating: .milliseconds(50))
+                timer.setEventHandler { [weak self] in
+                    if self?.sps != nil { waitResult.signal(); timer.cancel() }
+                }
+                timer.resume()
+                _ = waitResult.wait(timeout: deadline)
+                timer.cancel()
+            }
             let sdp = buildSDP()
             let len = sdp.data(using: .utf8)!.count
             sendResponse("RTSP/1.0 200 OK\r\nCSeq: \(cseq)\r\nContent-Type: application/sdp\r\nContent-Length: \(len)\r\n\r\n\(sdp)")
