@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Camera -->
+    <key>NSCameraUsageDescription</key>
+    <string>RTSPCam needs camera access to stream live video.</string>
+
+    <!-- Microphone (for future audio streaming) -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>RTSPCam needs microphone access for audio streaming.</string>
+
+    <!-- Photo Library -->
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>RTSPCam can save recordings to your photo library.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>RTSPCam can save recordings to your photo library.</string>
+
+    <!-- Location (future projects) -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>RTSPCam can embed GPS location in stream metadata.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>RTSPCam can embed GPS location in stream metadata.</string>
+
+    <!-- Local Network (required for RTSP server on iOS 14+) -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>RTSPCam runs an RTSP server so other devices can receive your camera stream.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_rtsp._tcp</string>
+    </array>
+
+    <!-- Background modes: keep streaming when screen locks -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>fetch</string>
+        <string>processing</string>
+        <string>voip</string>
+    </array>
+
+    <!-- Bluetooth (future) -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>For future Bluetooth peripheral support.</string>
+
+    <!-- Face ID (future) -->
+    <key>NSFaceIDUsageDescription</key>
+    <string>For authentication in future versions.</string>
+
+    <!-- Motion (future) -->
+    <key>NSMotionUsageDescription</key>
+    <string>For motion-based features in future versions.</string>
+
+    <!-- App Transport Security: allow all (for RTSP on local network) -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+
+    <!-- Supported orientations -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+</dict>
+</plist>
