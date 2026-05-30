@@ -14,14 +14,12 @@ struct ContentView: View {
             Color.black.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Camera preview (fills most of screen)
                 CameraPreviewView(layer: $previewLayer)
                     .ignoresSafeArea(edges: .top)
                     .overlay(alignment: .topLeading) {
                         statsOverlay
                     }
 
-                // Bottom control panel
                 bottomPanel
             }
         }
@@ -72,7 +70,6 @@ struct ContentView: View {
     // MARK: - Bottom Panel
     var bottomPanel: some View {
         VStack(spacing: 16) {
-            // RTSP URL box
             VStack(alignment: .leading, spacing: 6) {
                 Text("RTSP STREAM URL")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -108,13 +105,11 @@ struct ContentView: View {
             .background(Color.white.opacity(0.07))
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            // Connection hint
             Text("Connect with: ffplay \"\(rtspURL)\" or VLC → Open Network")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.gray)
                 .multilineTextAlignment(.center)
 
-            // Start/Stop button
             Button {
                 toggleStreaming()
             } label: {
@@ -138,21 +133,22 @@ struct ContentView: View {
 
     // MARK: - Logic
     private func setup() {
-        // Wire camera → server
-        camera.onNAL = { [weak rtspServer] data, pts, isKeyframe in
-            rtspServer?.sendNAL(data, pts: pts, isKeyframe: isKeyframe)
+        // Wire camera NAL output → server
+        camera.onNAL = { data, pts, isKeyframe in
+            rtspServer.sendNAL(data, pts: pts, isKeyframe: isKeyframe)
         }
-        camera.onSPSPPS = { [weak rtspServer] sps, pps in
-            // Update all connected clients with SPS/PPS
-            // (handled inside RTSPServer via the SDP on DESCRIBE)
+
+        // FIX: wire SPS/PPS updates to the server so DESCRIBE always has fresh params
+        camera.onSPSPPS = { sps, pps in
+            rtspServer.updateSPSPPS(sps: sps, pps: pps)
         }
+
         camera.onPreviewLayer = { layer in
             DispatchQueue.main.async {
                 previewLayer = layer
             }
         }
 
-        // Start server
         do {
             try rtspServer.start()
         } catch {
@@ -161,11 +157,8 @@ struct ContentView: View {
         }
 
         updateURL()
-
-        // Auto-start camera
         toggleStreaming()
 
-        // Refresh IP every 3 seconds (WiFi can change)
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
             updateURL()
         }
