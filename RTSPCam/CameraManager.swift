@@ -142,8 +142,11 @@ final class CameraManager: NSObject, ObservableObject {
 
         let manager = Unmanaged<CameraManager>.fromOpaque(refcon).takeUnretainedValue()
 
-        // FIX: correct keyframe check — notSync means it's NOT a keyframe
-        let isKeyframe = !flags.contains(.notSync)
+        // FIX: correct keyframe check via sample buffer attachment (VTEncodeInfoFlags.notSync is not public API)
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+            as? [[CFString: Any]]
+        let dependsOnOthers = attachments?.first?[kCMSampleAttachmentKey_DependsOnOthers] as? Bool
+        let isKeyframe = dependsOnOthers != true
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if isKeyframe, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
