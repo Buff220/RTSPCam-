@@ -3,48 +3,36 @@ import VideoToolbox
 import CoreMedia
 import os.log
 
-// MARK: - Camera Manager
-// Captures camera frames, encodes to H264 using VideoToolbox (hardware),
-// then fires callbacks with raw NAL units for the RTSP server.
-
 final class CameraManager: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var fps: Double = 0
     @Published var resolution: String = ""
     @Published var bitrateMbps: Double = 0
 
-    // Callbacks
     var onNAL: ((_ data: Data, _ pts: CMTime, _ isKeyframe: Bool) -> Void)?
     var onSPSPPS: ((_ sps: Data, _ pps: Data) -> Void)?
     var onPreviewLayer: ((_ layer: AVCaptureVideoPreviewLayer) -> Void)?
 
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session", qos: .userInteractive)
-    private var videoOutput: AVCaptureVideoDataOutput?
     private var encoder: VTCompressionSession?
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
-    // Stats
     private var frameCount = 0
     private var lastFPSTime = CACurrentMediaTime()
     private var bytesSent = 0
     private var lastBitrateTime = CACurrentMediaTime()
 
-    // Config
-    var targetBitrate: Int = 4_000_000   // 4 Mbps default
+    var targetBitrate: Int = 4_000_000
     var targetFPS: Int32 = 30
-    var useWideCamera: Bool = false
 
     private let logger = Logger(subsystem: "RTSPCam", category: "Camera")
 
-    // MARK: - Start
     func start() {
         sessionQueue.async { [weak self] in
             self?.configureSession()
             self?.session.startRunning()
-            DispatchQueue.main.async {
-                self?.isRunning = true
-            }
+            DispatchQueue.main.async { self?.isRunning = true }
         }
     }
 
@@ -52,20 +40,15 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             self?.session.stopRunning()
             self?.destroyEncoder()
-            DispatchQueue.main.async {
-                self?.isRunning = false
-            }
+            DispatchQueue.main.async { self?.isRunning = false }
         }
     }
 
-    // MARK: - Session Setup
     private func configureSession() {
         session.beginConfiguration()
         session.sessionPreset = .hd1920x1080
 
-        // Input
-        let cameraPosition: AVCaptureDevice.Position = .back
-        guard let device = bestCamera(position: cameraPosition) else {
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             logger.error("No camera found")
             session.commitConfiguration()
             return
@@ -80,25 +63,23 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        // Configure frame rate
         configureFrameRate(device: device, fps: targetFPS)
 
-        // Output
         let output = AVCaptureVideoDataOutput()
-        output.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        ]
+        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
         output.alwaysDiscardsLateVideoFrames = true
         output.setSampleBufferDelegate(self, queue: sessionQueue)
         if session.canAddOutput(output) { session.addOutput(output) }
-        videoOutput = output
 
-        // Set video orientation
+        // Set orientation — videoRotationAngle requires iOS 17, use legacy on iOS 16
         if let conn = output.connection(with: .video) {
-            conn.videoRotationAngle = 90 // portrait
+            if #available(iOS 17.0, *) {
+                conn.videoRotationAngle = 90
+            } else {
+                conn.videoOrientation = .portrait
+            }
         }
 
-        // Preview layer (created on main thread)
         let layer = AVCaptureVideoPreviewLayer(session: session)
         layer.videoGravity = .resizeAspectFill
         previewLayer = layer
@@ -108,65 +89,34 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         session.commitConfiguration()
-
-        // Resolution string
-        DispatchQueue.main.async { [weak self] in
-            self?.resolution = "1920×1080"
-        }
-
-        // Start encoder
+        DispatchQueue.main.async { self.resolution = "1920×1080" }
         setupEncoder(width: 1920, height: 1080)
-    }
-
-    private func bestCamera(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        // Prefer dual wide, fall back to wide angle
-        if useWideCamera,
-           let d = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: position) {
-            return d
-        }
-        if let d = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) {
-            return d
-        }
-        return AVCaptureDevice.default(for: .video)
     }
 
     private func configureFrameRate(device: AVCaptureDevice, fps: Int32) {
         try? device.lockForConfiguration()
         let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
-        for format in device.formats {
-            let ranges = format.videoSupportedFrameRateRanges
-            if ranges.contains(where: { $0.maxFrameRate >= Double(fps) }) {
-                device.activeVideoMinFrameDuration = duration
-                device.activeVideoMaxFrameDuration = duration
-                break
-            }
-        }
+        device.activeVideoMinFrameDuration = duration
+        device.activeVideoMaxFrameDuration = duration
         device.unlockForConfiguration()
     }
 
-    // MARK: - VideoToolbox H264 Encoder
     private func setupEncoder(width: Int32, height: Int32) {
         destroyEncoder()
-
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(
-            allocator: nil,
-            width: width,
-            height: height,
+            allocator: nil, width: width, height: height,
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: nil,
+            encoderSpecification: nil, imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: encoderOutputCallback,
             refcon: Unmanaged.passUnretained(self).toOpaque(),
             compressionSessionOut: &session
         )
-
         guard status == noErr, let session else {
             logger.error("Failed to create VT session: \(status)")
             return
         }
-
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
@@ -174,13 +124,11 @@ final class CameraManager: NSObject, ObservableObject {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFPS as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: Int32(targetFPS * 2) as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
-
-        // Enable hardware encoding
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, value: kCFBooleanTrue)
-
+        // kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder is iOS 17.4+, skip it —
+        // VideoToolbox uses hardware by default on iPhone anyway.
         VTCompressionSessionPrepareToEncodeFrames(session)
         encoder = session
-        logger.info("H264 encoder ready (\(width)x\(height) @ \(self.targetFPS)fps, \(self.targetBitrate/1000)kbps)")
+        logger.info("H264 encoder ready (\(width)x\(height) @ \(self.targetFPS)fps)")
     }
 
     private func destroyEncoder() {
@@ -189,35 +137,29 @@ final class CameraManager: NSObject, ObservableObject {
         encoder = nil
     }
 
-    // MARK: - Encoder Output Callback (C function)
     private let encoderOutputCallback: VTCompressionOutputCallback = { refcon, _, status, flags, sampleBuffer in
-        guard status == noErr,
-              let refcon,
-              let sampleBuffer,
+        guard status == noErr, let refcon, let sampleBuffer,
               CMSampleBufferIsValid(sampleBuffer),
               let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
         let manager = Unmanaged<CameraManager>.fromOpaque(refcon).takeUnretainedValue()
-        let isKeyframe = !((flags.contains(.frameDropped)) || (flags.contains(.notSync)))
+
+        // A frame is a keyframe when it is NOT frameDropped (notSync flag doesn't exist in current SDK)
+        let isKeyframe = !flags.contains(.frameDropped)
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-        // Extract SPS/PPS from keyframe format description
         if isKeyframe, let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
             manager.extractSPSPPS(from: formatDesc)
         }
 
-        // Get raw NAL data
         var dataLength = 0
         var dataPointer: UnsafeMutablePointer<Int8>?
-        CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &dataLength, dataPointerOut: &dataPointer)
-
+        CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+                                    totalLengthOut: &dataLength, dataPointerOut: &dataPointer)
         if let ptr = dataPointer, dataLength > 0 {
-            let rawData = Data(bytes: ptr, count: dataLength)
-            // Parse AVCC format (4-byte length prefix) → convert to Annex B
-            manager.parseAVCC(rawData, pts: pts, isKeyframe: isKeyframe)
+            manager.parseAVCC(Data(bytes: ptr, count: dataLength), pts: pts, isKeyframe: isKeyframe)
         }
 
-        // Bitrate stats
         manager.bytesSent += dataLength
         let now = CACurrentMediaTime()
         if now - manager.lastBitrateTime >= 1.0 {
@@ -233,28 +175,30 @@ final class CameraManager: NSObject, ObservableObject {
         var spsLen = 0
         var ppsOut: UnsafePointer<UInt8>?
         var ppsLen = 0
-        var nalSize = 0
+        var nalSize: Int32 = 0   // must be Int32
 
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: 0, parameterSetPointerOut: &spsOut, parameterSetSizeOut: &spsLen, parameterSetCountOut: nil, nalUnitHeaderLengthOut: &nalSize)
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: 1, parameterSetPointerOut: &ppsOut, parameterSetSizeOut: &ppsLen, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            format, parameterSetIndex: 0,
+            parameterSetPointerOut: &spsOut, parameterSetSizeOut: &spsLen,
+            parameterSetCountOut: nil, nalUnitHeaderLengthOut: &nalSize)
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            format, parameterSetIndex: 1,
+            parameterSetPointerOut: &ppsOut, parameterSetSizeOut: &ppsLen,
+            parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
 
         if let s = spsOut, let p = ppsOut {
             let sps = Data(bytes: s, count: spsLen)
             let pps = Data(bytes: p, count: ppsLen)
-            DispatchQueue.main.async { [weak self] in
-                self?.onSPSPPS?(sps, pps)
-            }
+            DispatchQueue.main.async { [weak self] in self?.onSPSPPS?(sps, pps) }
         }
     }
 
-    // Convert AVCC (length-prefixed) to Annex B (start-code-prefixed) NALs
     private func parseAVCC(_ data: Data, pts: CMTime, isKeyframe: Bool) {
         let startCode = Data([0x00, 0x00, 0x00, 0x01])
         var offset = 0
         while offset + 4 <= data.count {
             let length = data.withUnsafeBytes { buf -> Int in
-                let ptr = buf.baseAddress!.advanced(by: offset)
-                return Int(CFSwapInt32BigToHost(ptr.load(as: UInt32.self)))
+                Int(CFSwapInt32BigToHost(buf.baseAddress!.advanced(by: offset).load(as: UInt32.self)))
             }
             offset += 4
             guard offset + length <= data.count else { break }
@@ -266,22 +210,19 @@ final class CameraManager: NSObject, ObservableObject {
     }
 }
 
-// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let enc = encoder,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        VTCompressionSessionEncodeFrame(enc, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid, frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil)
-
-        // FPS counter
+        VTCompressionSessionEncodeFrame(enc, imageBuffer: pixelBuffer,
+                                        presentationTimeStamp: pts, duration: .invalid,
+                                        frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil)
         frameCount += 1
         let now = CACurrentMediaTime()
         if now - lastFPSTime >= 1.0 {
             let fps = Double(frameCount) / (now - lastFPSTime)
-            frameCount = 0
-            lastFPSTime = now
+            frameCount = 0; lastFPSTime = now
             DispatchQueue.main.async { [weak self] in self?.fps = fps }
         }
     }
