@@ -25,6 +25,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     var targetBitrate: Int = 4_000_000
     var targetFPS: Int32 = 30
+    private var needsImmediateKeyframe = true   // force keyframe on first frame so SPS/PPS are ready
 
     private let logger = Logger(subsystem: "RTSPCam", category: "Camera")
 
@@ -126,6 +127,7 @@ final class CameraManager: NSObject, ObservableObject {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CABAC)
         VTCompressionSessionPrepareToEncodeFrames(session)
         encoder = session
+        needsImmediateKeyframe = true   // will force keyframe on next frame
         logger.info("H264 encoder ready (\(width)x\(height) @ \(self.targetFPS)fps)")
     }
 
@@ -217,9 +219,15 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let enc = encoder,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        // Force a keyframe on the very first frame so SPS/PPS are extracted before any client connects
+        var frameProps: CFDictionary? = nil
+        if needsImmediateKeyframe {
+            needsImmediateKeyframe = false
+            frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
+        }
         VTCompressionSessionEncodeFrame(enc, imageBuffer: pixelBuffer,
                                         presentationTimeStamp: pts, duration: .invalid,
-                                        frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil)
+                                        frameProperties: frameProps, sourceFrameRefcon: nil, infoFlagsOut: nil)
         frameCount += 1
         let now = CACurrentMediaTime()
         if now - lastFPSTime >= 1.0 {
