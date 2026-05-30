@@ -1,0 +1,56 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # allows manual trigger from GitHub UI (big green button)
+
+jobs:
+  build:
+    runs-on: macos-14   # free macOS runner with Xcode 15, Apple Silicon
+
+    steps:
+      # 1. Check out your code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Select Xcode version
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      # 3. Show available SDKs (useful for debugging)
+      - name: Show SDKs
+        run: xcodebuild -showsdks
+
+      # 4. Build the app (no code signing needed for unsigned IPA)
+      - name: Build for iOS
+        run: |
+          xcodebuild \
+            -project RTSPCam.xcodeproj \
+            -scheme RTSPCam \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR=$PWD/build/Release-iphoneos \
+            clean build
+
+      # 5. Package into .ipa
+      # AltStore re-signs it anyway, so we just zip the .app
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/Release-iphoneos/RTSPCam.app Payload/RTSPCam.app
+          zip -r RTSPCam.ipa Payload
+          echo "IPA size: $(du -sh RTSPCam.ipa | cut -f1)"
+
+      # 6. Upload IPA as a downloadable artifact
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTSPCam-IPA
+          path: RTSPCam.ipa
+          retention-days: 30   # keeps the download available for 30 days
